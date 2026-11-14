@@ -112,6 +112,34 @@ fn get_call_site(span: Span, ctxt: SyntaxContext) -> Option<Span> {
     (span.ctxt() != ctxt).then(|| walk_span_to_context(span, ctxt).unwrap_or(span))
 }
 
+fn should_ignore_function<'tcx>(
+    cx: &LateContext<'tcx>,
+    kind: FnKind<'tcx>,
+    decl: &'tcx FnDecl<'_>,
+    body: &'tcx Body<'_>,
+    span: Span,
+    ignore_single_line_closures: bool,
+) -> bool {
+    if (!matches!(kind, FnKind::Closure) && matches!(decl.output, FnRetTy::DefaultReturn(_)))
+        || span.ctxt() != body.value.span.ctxt()
+        || span.in_external_macro(cx.sess().source_map())
+    {
+        return true;
+    }
+
+    ignore_single_line_closures && matches!(kind, FnKind::Closure) && !cx.sess().source_map().is_multiline(span)
+}
+
+fn extract_expr<'tcx>(cx: &LateContext<'tcx>, kind: FnKind<'tcx>, body: &'tcx Body<'_>) -> Option<&'tcx Expr<'tcx>> {
+    if kind.asyncness().is_async() {
+        get_async_fn_body(cx.tcx, body)
+    } else if let Some(expr) = get_async_closure_expr(cx.tcx, body.value) {
+        Some(expr)
+    } else {
+        Some(body.value)
+    }
+}
+
 fn lint_implicit_returns(
     cx: &LateContext<'_>,
     expr: &Expr<'_>,
@@ -240,17 +268,7 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitReturn {
         span: Span,
         _: LocalDefId,
     ) {
-        if (!matches!(kind, FnKind::Closure) && matches!(decl.output, FnRetTy::DefaultReturn(_)))
-            || span.ctxt() != body.value.span.ctxt()
-            || span.in_external_macro(cx.sess().source_map())
-        {
-            return;
-        }
-
-        if self.ignore_single_line_closures
-            && matches!(kind, FnKind::Closure)
-            && !cx.sess().source_map().is_multiline(span)
-        {
+        if should_ignore_function(cx, kind, decl, body, span, self.ignore_single_line_closures) {
             return;
         }
 
@@ -259,15 +277,8 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitReturn {
             return;
         }
 
-        let expr = if kind.asyncness().is_async() {
-            match get_async_fn_body(cx.tcx, body) {
-                Some(e) => e,
-                None => return,
-            }
-        } else if let Some(expr) = get_async_closure_expr(cx.tcx, body.value) {
-            expr
-        } else {
-            body.value
+        let Some(expr) = extract_expr(cx, kind, body) else {
+            return;
         };
 
         if is_from_proc_macro(cx, expr) {
