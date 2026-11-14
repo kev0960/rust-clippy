@@ -112,22 +112,6 @@ fn get_call_site(span: Span, ctxt: SyntaxContext) -> Option<Span> {
     (span.ctxt() != ctxt).then(|| walk_span_to_context(span, ctxt).unwrap_or(span))
 }
 
-fn should_lint_function<'tcx>(
-    cx: &LateContext<'tcx>,
-    kind: FnKind<'tcx>,
-    decl: &'tcx FnDecl<'_>,
-    body: &'tcx Body<'_>,
-    span: Span,
-    ignore_single_line_closures: bool,
-) -> bool {
-    let is_closure = matches!(kind, FnKind::Closure);
-
-    (is_closure || !matches!(decl.output, FnRetTy::DefaultReturn(_)))
-        && span.ctxt() == body.value.span.ctxt()
-        && !span.in_external_macro(cx.sess().source_map())
-        && !(ignore_single_line_closures && is_closure && !cx.sess().source_map().is_multiline(span))
-}
-
 fn extract_expr<'tcx>(cx: &LateContext<'tcx>, kind: FnKind<'tcx>, body: &'tcx Body<'_>) -> Option<&'tcx Expr<'tcx>> {
     if kind.asyncness().is_async() {
         get_async_fn_body(cx.tcx, body)
@@ -266,7 +250,11 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitReturn {
         span: Span,
         _: LocalDefId,
     ) {
-        if should_lint_function(cx, kind, decl, body, span, self.ignore_single_line_closures)
+        if let is_closure = matches!(kind, FnKind::Closure)
+            && (is_closure || !matches!(decl.output, FnRetTy::DefaultReturn(_)))
+            && span.ctxt() == body.value.span.ctxt()
+            && !span.in_external_macro(cx.sess().source_map())
+            && !(self.ignore_single_line_closures && is_closure && !cx.sess().source_map().is_multiline(span))
             && let res_ty = cx.typeck_results().expr_ty(body.value)
             && !res_ty.is_unit()
             && !res_ty.is_never()
