@@ -112,7 +112,7 @@ fn get_call_site(span: Span, ctxt: SyntaxContext) -> Option<Span> {
     (span.ctxt() != ctxt).then(|| walk_span_to_context(span, ctxt).unwrap_or(span))
 }
 
-fn should_ignore_function<'tcx>(
+fn should_lint_function<'tcx>(
     cx: &LateContext<'tcx>,
     kind: FnKind<'tcx>,
     decl: &'tcx FnDecl<'_>,
@@ -120,14 +120,12 @@ fn should_ignore_function<'tcx>(
     span: Span,
     ignore_single_line_closures: bool,
 ) -> bool {
-    if (!matches!(kind, FnKind::Closure) && matches!(decl.output, FnRetTy::DefaultReturn(_)))
-        || span.ctxt() != body.value.span.ctxt()
-        || span.in_external_macro(cx.sess().source_map())
-    {
-        return true;
-    }
+    let is_closure = matches!(kind, FnKind::Closure);
 
-    ignore_single_line_closures && matches!(kind, FnKind::Closure) && !cx.sess().source_map().is_multiline(span)
+    (is_closure || !matches!(decl.output, FnRetTy::DefaultReturn(_)))
+        && span.ctxt() == body.value.span.ctxt()
+        && !span.in_external_macro(cx.sess().source_map())
+        && !(ignore_single_line_closures && is_closure && !cx.sess().source_map().is_multiline(span))
 }
 
 fn extract_expr<'tcx>(cx: &LateContext<'tcx>, kind: FnKind<'tcx>, body: &'tcx Body<'_>) -> Option<&'tcx Expr<'tcx>> {
@@ -268,23 +266,14 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitReturn {
         span: Span,
         _: LocalDefId,
     ) {
-        if should_ignore_function(cx, kind, decl, body, span, self.ignore_single_line_closures) {
-            return;
+        if should_lint_function(cx, kind, decl, body, span, self.ignore_single_line_closures)
+            && let res_ty = cx.typeck_results().expr_ty(body.value)
+            && !res_ty.is_unit()
+            && !res_ty.is_never()
+            && let Some(expr) = extract_expr(cx, kind, body)
+            && !is_from_proc_macro(cx, expr)
+        {
+            lint_implicit_returns(cx, expr, expr.span.ctxt(), None);
         }
-
-        let res_ty = cx.typeck_results().expr_ty(body.value);
-        if res_ty.is_unit() || res_ty.is_never() {
-            return;
-        }
-
-        let Some(expr) = extract_expr(cx, kind, body) else {
-            return;
-        };
-
-        if is_from_proc_macro(cx, expr) {
-            return;
-        }
-
-        lint_implicit_returns(cx, expr, expr.span.ctxt(), None);
     }
 }
